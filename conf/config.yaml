@@ -1,8 +1,7 @@
 defaults:
-  - hydra/job_logging: colorlog
-  - hydra/hydra_logging: colorlog
   - preset: default
-
+  - hydra/job_logging: colorlog 
+  - hydra/hydra_logging: colorlog
 db:
   name: 'cifar10'  # available options are cifar10 and cifar100 at the moment
   root: './data'  # path to save the data
@@ -72,7 +71,7 @@ quant:
 
 
 rendezvous_file: ./rendezvous
-ddp: 0  # if set to true, uses all available GPUs.
+ddp: True  # if set to true, uses all available GPUs.
 rank:
 world_size: 1
 

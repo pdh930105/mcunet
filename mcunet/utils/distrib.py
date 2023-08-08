@@ -13,6 +13,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader, Subset
 from torch.nn.parallel.distributed import DistributedDataParallel
 
+
 logger = logging.getLogger(__name__)
 rank = 0
 local_rank = 0
