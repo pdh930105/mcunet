@@ -142,7 +142,6 @@ class MBGumbelInvertedConvLayer(MyModule):
                     kernel_max_out *= gumbel[:, 0].unsqueeze(1).unsqueeze(2).unsqueeze(3)
                     for i, active_kernel_size in enumerate(self.kernel_size_list[1:]):
                         start, end = sub_filter_start_end(self.kernel_size_list[i], active_kernel_size)
-                        print(start, end, active_kernel_size, self.kernel_size_list[i], depth_weight.shape)
                         kernel_weight = depth_weight[:, :, start:end, start:end].contiguous()
                         kernel_weight = kernel_weight.view(kernel_weight.size(0), kernel_weight.size(1), -1)
                         kernel_weight = self.kernel_transform_linear_list[i](kernel_weight)
@@ -208,7 +207,6 @@ class MBGumbelInvertedConvLayer(MyModule):
                 kernel_max_out *= gumbel[:, len(self.expand_ratio_list)].unsqueeze(1).unsqueeze(2).unsqueeze(3)
                 for i, active_kernel_size in enumerate(self.kernel_size_list[1:]):
                     start, end = sub_filter_start_end(self.kernel_size_list[i], active_kernel_size)
-                    print(start, end, active_kernel_size, self.kernel_size_list[i], depth_weight.shape)
                     kernel_weight = depth_weight[:, :, start:end, start:end].contiguous()
                     kernel_weight = kernel_weight.view(kernel_weight.size(0), kernel_weight.size(1), -1)
                     kernel_weight = self.kernel_transform_linear_list[i](kernel_weight)
@@ -351,39 +349,69 @@ class GumbelMCUNets(MyNetwork):
         self.dropout = nn.Dropout(0.2)
         self.gumbel_fc2 = nn.Linear(256, sum(self.gumbel_index_list))
         
+        self.gumbel_block = nn.Sequential(self.avgpool_policy, 
+                                           self.gumbel_features_flatten, 
+                                           self.gumbel_fc1, 
+                                           self.dropout, 
+                                           self.gumbel_fc2)
+        
+        
     def forward(self, x):
         x = self.first_conv(x)
         for i, block in enumerate(self.blocks):            
             if i == self.gumbel_feature_extract_block:
                 # feautre map and gumbel output extract
-                gumbel_input = self.avgpool_policy(x)
-                gumbel_input = self.gumbel_features_flatten(gumbel_input)
-                gumbel_input = self.gumbel_fc1(gumbel_input)
-                gumbel_input = self.dropout(gumbel_input)
-                gumbel_output = self.gumbel_fc2(gumbel_input)
+                gumbel_output = self.gumbel_block(x)
                 gumbel_output = gumbel_output.view(-1, sum(self.gumbel_index_list))
                 break
             x = block(x)
 
         gumbel_index = 0
+        gumbel_one_hot_list = []
         for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block:]):
             expand_index, kernel_index = len(block.mobile_inverted_conv.expand_ratio_list), len(block.mobile_inverted_conv.kernel_size_list)
-            if expand_index > 1 and kernel_index > 1:
-                gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index  + kernel_index]
-                gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
-                gumbel_index += expand_index + kernel_index
-                
-            elif expand_index > 1:
-                gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
-                gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
-                gumbel_index += expand_index
-            elif kernel_index >1:
-                gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + kernel_index]
-                gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
-                gumbel_index += kernel_index
+            
+            if self.training:            
+                if expand_index > 1 and kernel_index > 1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index  + kernel_index]
+                    gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
+                    gumbel_index += expand_index + kernel_index
+                    
+                elif expand_index > 1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
+                    gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
+                    gumbel_index += expand_index
+                elif kernel_index >1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + kernel_index]
+                    gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
+                    gumbel_index += kernel_index
+                else:
+                    gumbel_one_hot = None
+                x = block(x, gumbel_one_hot)    
+        
             else:
-                gumbel_one_hot = None
-            x = block(x, gumbel_one_hot)    
+                if expand_index > 1 and kernel_index > 1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index  + kernel_index]
+                    index = gumbel_input.max(dim=-1, keepdim=True)[1]
+                    gumbel_one_hot = torch.zeros_like(gumbel_input, memory_format=torch.legacy_contiguous_format).scatter_(-1, index, 1.0)
+                    gumbel_index += expand_index + kernel_index
+                    
+                elif expand_index > 1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
+                    index = gumbel_input.max(dim=-1, keepdim=True)[1]
+                    gumbel_one_hot = torch.zeros_like(gumbel_input, memory_format=torch.legacy_contiguous_format).scatter_(-1, index, 1.0)
+                    gumbel_index += expand_index
+                elif kernel_index >1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + kernel_index]
+                    index = gumbel_input.max(dim=-1, keepdim=True)[1]
+                    gumbel_one_hot = torch.zeros_like(gumbel_input, memory_format=torch.legacy_contiguous_format).scatter_(-1, index, 1.0)
+                    gumbel_index += kernel_index
+                else:
+                    gumbel_one_hot = None
+                x = block(x, gumbel_one_hot)
+            
+            gumbel_one_hot_list.append(gumbel_one_hot)    
+                
         
         if self.feature_mix_layer is not None:
             x = self.feature_mix_layer(x)
@@ -397,11 +425,9 @@ class GumbelMCUNets(MyNetwork):
             x = block(x)
         if self.feature_mix_layer is not None:
             x = self.feature_mix_layer(x)
-        x = x.mean(3).mean(2
-                           )
+        x = x.mean(3).mean(2)
         x = self.classifier(x)
         return x
-    
     
     @property
     def module_str(self):
