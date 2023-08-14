@@ -337,9 +337,6 @@ class MBGumbelInvertedConvLayer(MyModule):
         else:
             gumbel_expand, gumbel_kernel = gumbel_idx[:, :len(self.expand_ratio_list)], gumbel_idx[:, len(self.expand_ratio_list):]
             expand_flops = gumbel_expand * (self.inverted_flops + self.pw_flops)
-            print(gumbel_expand, gumbel_kernel)
-            out = gumbel_expand * self.expand_ratio_list
-            out2 = self.expand_ratio_list / self.max_expand_ratio
             expand_kernel_flops = (gumbel_expand * self.expand_ratio_list / self.max_expand_ratio).sum(dim=1) 
             expand_kernel_flops = expand_kernel_flops.unsqueeze(1) * (gumbel_kernel * (self.dw_flops)) + gumbel_kernel * (self.convert_flops) 
             expand_flops = expand_flops.sum(dim=1)
