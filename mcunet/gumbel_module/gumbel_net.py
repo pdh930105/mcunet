@@ -4,13 +4,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import copy
+from fvcore.nn import FlopCountAnalysis
+
 
 from ..tinynas.nn.modules import MBInvertedConvLayer
 from ..tinynas.nn.networks import MobileInvertedResidualBlock
 
 from .gumbel_layer import MBGumbelInvertedConvLayer, MobileGumbelInvertedResidualBlock
 
-from ..utils import MyModule, MyNetwork, SEModule, build_activation, get_same_padding, sub_filter_start_end
+from ..utils import MyModule, MyNetwork, SEModule, build_activation, get_same_padding, sub_filter_start_end, rm_bn_from_net
 from ..tinynas.nn.modules import ZeroLayer, set_layer_from_config
 
 
@@ -84,29 +86,23 @@ class GumbelMCUNets(MyNetwork):
         gumbel_one_hot_list = []
         for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block:]):
             expand_index, kernel_index = len(block.mobile_inverted_conv.expand_ratio_list), len(block.mobile_inverted_conv.kernel_size_list)
-            print(j ,"idx :", expand_index, kernel_index)
             if self.training:            
                 if expand_index > 1 and kernel_index > 1:
-                    print("expand and kernel")
                     gumbel_input_expand = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
                     gumbel_one_hot_expand = F.gumbel_softmax(gumbel_input_expand, tau=1, hard=True)
                     gumbel_input_kernel = gumbel_output[:, gumbel_index + expand_index: gumbel_index + expand_index + kernel_index]
                     gumbel_one_hot_kernel = F.gumbel_softmax(gumbel_input_kernel, tau=1, hard=True)
                     gumbel_one_hot = torch.cat([gumbel_one_hot_expand, gumbel_one_hot_kernel], dim=-1)
                     gumbel_index += expand_index + kernel_index
-                    print("gumbel one hot shape :", gumbel_one_hot.shape)
                 elif expand_index > 1:
-                    print("expand")
                     gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
                     gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
                     gumbel_index += expand_index
                 elif kernel_index >1:
-                    print("kernel")
                     gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + kernel_index]
                     gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
                     gumbel_index += kernel_index
                 else:
-                    print("none")
                     gumbel_one_hot = None
                 x = block(x, gumbel_one_hot)
         
@@ -138,7 +134,7 @@ class GumbelMCUNets(MyNetwork):
             x = self.feature_mix_layer(x)
         x = x.mean(3).mean(2)
         x = self.classifier(x)
-        return x
+        return x, gumbel_one_hot_list
         
     def forward_original(self, x):
         x = self.first_conv(x)
@@ -149,6 +145,60 @@ class GumbelMCUNets(MyNetwork):
         x = x.mean(3).mean(2)
         x = self.classifier(x)
         return x
+    
+    def set_static_flops(self, x):
+        flops = 0
+        flops += FlopCountAnalysis(self.first_conv, x).total()
+        x = self.first_conv(x)
+        for i, block in enumerate(self.blocks):
+            if i == self.gumbel_feature_extract_block:
+                # feautre map and gumbel output extract
+                gumbel_output = self.gumbel_block(x)
+                gumbel_output = gumbel_output.view(-1, sum(self.gumbel_index_list))
+                flops += FlopCountAnalysis(self.gumbel_block, x).total()
+                break
+            
+            rm_bn_block = copy.deepcopy(block)
+            rm_bn_from_net(rm_bn_block)
+            flops += FlopCountAnalysis(rm_bn_block, x).total()
+            x = block(x)
+            del rm_bn_block
+        self.static_flops = flops
+        self.dynamic_flops = 0
+        flops = 0
+        for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block:]):
+            rm_bn_block = copy.deepcopy(block)
+            rm_bn_from_net(rm_bn_block)
+            flops += FlopCountAnalysis(rm_bn_block, x).total()
+            del rm_bn_block
+            x = block(x)
+            
+        self.dynamic_flops += flops
+        flops = 0
+        if self.feature_mix_layer:
+            flops += FlopCountAnalysis(self.feature_mix_layer, x).total()
+            x = self.feature_mix_layer(x)
+            
+        x = x.mean(3).mean(2)
+        flops = FlopCountAnalysis(self.classifier, x).total()
+        x = self.classifier(x)
+        self.static_flops += flops
+        print(f"Success Log Static & Dynamic Flops : {self.static_flops}, {self.dynamic_flops}")
+        
+    def compute_flops(self, x, gumbel_one_hot_list):
+        flops = 0
+        batch_size = x[0]
+        for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block:]):
+            expand_index, kernel_index = len(block.mobile_inverted_conv.expand_ratio_list), len(block.mobile_inverted_conv.kernel_size_list)
+            if expand_index > 1 and kernel_index > 1:
+                flops += block.count_flops(gumbel_one_hot_list[j])
+            elif expand_index > 1:
+                flops += block.count_flops(gumbel_one_hot_list[j])
+            elif kernel_index >1:
+                flops += block.count_flops(gumbel_one_hot_list[j])
+            else:
+                flops += block.compute_flops(x)
+        return flops
     
     @property
     def module_str(self):
@@ -187,7 +237,6 @@ class GumbelMCUNets(MyNetwork):
         
         for i, block_config in enumerate(net_config['blocks']):
             if i < gumbel_feature_extract_block:
-                print(i, block_config)
                 blocks.append(MobileInvertedResidualBlock.build_from_config(block_config))
             else:
                 blocks.append(MobileGumbelInvertedResidualBlock.build_from_config(block_config))
@@ -205,6 +254,7 @@ class GumbelMCUNets(MyNetwork):
         
         for n, p in self.named_parameters():
             if has_deep_attr(mcunet, n):
-                print("load {} params ({})".format(n, p.shape))
                 set_deep_attr(self, n, get_deep_attr(mcunet, n))
+                
+        print(f"load pretrained mcumodel to gumbel net")
         

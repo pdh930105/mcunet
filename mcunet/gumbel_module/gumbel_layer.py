@@ -99,8 +99,10 @@ class MBGumbelInvertedConvLayer(MyModule):
             ('bn', nn.BatchNorm2d(out_channels)),
         ]))
 
-        self.register_buffer('kernel_size_list', torch.Tensor(kernel_size_list))
-        self.register_buffer('expand_ratio_list', torch.Tensor(expand_ratio_list))
+        #self.kernel_size_list = kernel_size_list
+        #self.expand_ratio_list =expand_ratio_list
+        self.register_buffer('kernel_size_list', torch.tensor(kernel_size_list, dtype=torch.long))
+        self.register_buffer('expand_ratio_list', torch.tensor(expand_ratio_list, dtype=torch.long))
         
 
     def forward(self, x, gumbel=None):
@@ -166,6 +168,7 @@ class MBGumbelInvertedConvLayer(MyModule):
                     expand_max_out = self.inverted_bottleneck.act(expand_max_out)
                     expand_max_out *= gumbel[:, -1].unsqueeze(1).unsqueeze(2).unsqueeze(3)
                     for i, expand_ratio in enumerate(self.expand_ratio_list[:-1]):
+                        print(i, expand_ratio)
                         out = F.conv2d(x, expand_weight[:expand_ratio*self.in_channels, :, :, :], stride=1, padding=0)
                         out = F.batch_norm(out, self.inverted_bottleneck.bn.running_mean[:expand_ratio*self.in_channels], self.inverted_bottleneck.bn.running_var[:expand_ratio*self.in_channels], self.inverted_bottleneck.bn.weight[:expand_ratio*self.in_channels], self.inverted_bottleneck.bn.bias[:expand_ratio*self.in_channels], self.inverted_bottleneck.bn.training, self.inverted_bottleneck.bn.momentum, self.inverted_bottleneck.bn.eps)
                         out = self.inverted_bottleneck.act(out)
@@ -329,7 +332,7 @@ class MBGumbelInvertedConvLayer(MyModule):
         
         # 2. compute gumbel value return
         if len(self.expand_ratio_list) == 1 and len(self.kernel_size_list) == 1:
-            return self.inverted_flops + self.dw_flops + self.pw_flops
+            return (self.inverted_flops + self.dw_flops + self.pw_flops).sum(dim=1)
         elif len(self.expand_ratio_list) > 1 and len(self.kernel_size_list) == 1:
             return (gumbel_idx * (self.inverted_flops + self.dw_flops + self.pw_flops)).sum(dim=1)
         elif len(self.expand_ratio_list) == 1 and len(self.kernel_size_list) > 1:
@@ -488,19 +491,14 @@ class MobileGumbelInvertedResidualBlock(MyModule):
 
     def forward(self, x, gumbel_idx=None):
         if self.mobile_inverted_conv is None or isinstance(self.mobile_inverted_conv, ZeroLayer):
-            print(11)
             res = x
         elif (self.shortcut is None or isinstance(self.shortcut, ZeroLayer)) and gumbel_idx == None:
-            print(22)
             res = self.mobile_inverted_conv(x)
         elif self.shortcut is None or isinstance(self.shortcut, ZeroLayer) and gumbel_idx != None:
-            print(33)
             res = self.mobile_inverted_conv(x, gumbel_idx)
         elif self.shortcut is not None and gumbel_idx == None:
-            print(44)
             res = self.mobile_inverted_conv(x) + self.shortcut(x)
         else:
-            print(55)
             res = self.mobile_inverted_conv(x, gumbel_idx) + self.shortcut(x)
         return res
     
@@ -508,7 +506,7 @@ class MobileGumbelInvertedResidualBlock(MyModule):
         if self.mobile_inverted_conv is None or isinstance(self.mobile_inverted_conv, ZeroLayer):
             return 0
         else:
-            return self.mobile_inverted_conv.count_flops(gumbel_idx)
+            return self.mobile_inverted_conv.compute_gumbel_flops(gumbel_idx)
 
     @property
     def module_str(self):
