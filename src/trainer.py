@@ -10,25 +10,24 @@ import os
 import time
 
 import torch
-import distrib
-from utils import bold, copy_state, LogProgress
+import src.distrib as distrib
+from src.utils import bold, copy_state, LogProgress
 
 
 logger = logging.getLogger(__name__)
 
 
 class Trainer(object):
-    def __init__(self, data, model, criterion, optimizer, quantizer, args, model_size):
+    def __init__(self, data, model, criterion, optimizer, args, model_flops):
         self.tr_loader = data['tr']
         self.tt_loader = data['tt']
         self.model = model
         self.dmodel = distrib.wrap(model)
         self.optimizer = optimizer
         self.criterion = criterion
-        self.quantizer = quantizer
-        self.penalty = args.quant.penalty
-        self.model_size = model_size
-        self.compressed_model_size = model_size
+        self.flops_penalty = args.flops_penalty
+        self.model_flops = model_flops        
+        self.compressed_model_flops = model_flops
 
         if args.lr_sched == 'step':
             from torch.optim.lr_scheduler import StepLR
@@ -110,8 +109,6 @@ class Trainer(object):
                 self.model.load_state_dict(package['state'], strict=strict)
             if load_from == self.checkpoint:
                 self.optimizer.load_state_dict(package['optimizer'])
-                if self.quantizer and hasattr(self.quantizer, 'opt'):
-                    self.quantizer.opt.load_state_dict(package['quant_opt'])
                 if self.args.mixed:
                     self.scaler.load_state_dict(package['scaler'])
                 if self.sched is not None:
@@ -135,11 +132,13 @@ class Trainer(object):
             start = time.time()
             logger.info('-' * 70)
             logger.info("Training...")
+            
             train_loss, train_acc = self._run_one_epoch(epoch)
             logger.info(bold(f'Train Summary | End of Epoch {epoch + 1} | '
-                             f'Time {time.time() - start:.2f}s | train loss {train_loss:.5f} | '
-                             f'train accuracy {train_acc:.2f}'))
-            # Cross validation
+                              f'Time {time.time() - start:.2f}s | train loss {train_loss:.5f} | '
+                              f'train accuracy {train_acc:.2f}'))
+            
+            # # Cross validation
             logger.info('-' * 70)
             logger.info('Cross validation...')
             self.model.eval()  # Turn off Batchnorm & Dropout & Diffq
@@ -164,14 +163,14 @@ class Trainer(object):
             best_acc = 0
             for metrics in self.history:
                 if metrics['valid'] < best_loss:
-                    best_size = metrics['model_size']
+                    best_size = metrics['model_flops']
                     best_acc = metrics['valid_acc']
                     best_loss = metrics['valid']
             metrics = {'train': train_loss, 'train_acc': train_acc,
                        'valid': valid_loss, 'valid_acc': valid_acc,
                        'best': best_loss, 'best_size': best_size, 'best_acc': best_acc,
-                       'compressed_model_size': self.compressed_model_size,
-                       'model_size': self.model_size}
+                       'compressed_model_flops': self.compressed_model_flops,
+                       'model_flops': self.model_flops}
 
             # Save the best model
             if valid_loss == best_loss:
@@ -192,6 +191,7 @@ class Trainer(object):
 
     def _run_one_epoch(self, epoch, cross_valid=False):
         total_loss = 0
+        avg_flops = 0
         total = 0
         correct = 0
         data_loader = self.tr_loader if not cross_valid else self.tt_loader
@@ -204,27 +204,23 @@ class Trainer(object):
             inputs, targets = inputs.to(self.device), targets.to(self.device)
             if not cross_valid:
                 with torch.cuda.amp.autocast(bool(self.args.mixed)):
-                    yhat = self.dmodel(inputs)
+                    yhat, gumbel_idx = self.dmodel(inputs)
                     loss = self.criterion(yhat, targets)
-                    model_size = self.quantizer.model_size() if self.quantizer else 0
-                    if self.penalty > 0:
-                        loss = loss + self.penalty * model_size
+                    model_flops = self.dmodel.module.compute_flops(gumbel_idx)
+                    if self.flops_penalty > 0:
+                        loss = loss + self.flops_penalty * model_flops.mean()
             else:
                 # compute output
-                yhat = self.dmodel(inputs)
+                yhat, gumbel_idx = self.dmodel(inputs)
                 loss = self.criterion(yhat, targets)
 
             if not cross_valid:
                 # optimize model in training mode
                 self.optimizer.zero_grad()
-                if self.quantizer and hasattr(self.quantizer, 'opt'):
-                    self.quantizer.opt.zero_grad()
-
+                
                 if self.args.mixed:
                     self.scaler.scale(loss).backward()
                     self.scaler.unscale_(self.optimizer)
-                    if self.quantizer and hasattr(self.quantizer, 'opt'):
-                        self.scaler.unscale_(self.quantizer.opt)
                 else:
                     loss.backward()
 
@@ -234,11 +230,7 @@ class Trainer(object):
                     self.scaler.step(self.optimizer)
                 else:
                     self.optimizer.step()
-                if self.quantizer and hasattr(self.quantizer, 'opt'):
-                    if self.args.mixed:
-                        self.scaler.step(self.quantizer.opt)
-                    else:
-                        self.quantizer.opt.step()
+                
                 if self.args.mixed:
                     self.scaler.update()
 
@@ -246,12 +238,12 @@ class Trainer(object):
             _, predicted = yhat.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
-
+            
             total_acc = 100. * (correct / total)
             if not cross_valid:
                 logprog.update(
                     loss=format(total_loss / (i + 1), ".5f"),
-                    accuracy=format(total_acc, ".5f"), MS=format(model_size, ".3f"))
+                    accuracy=format(total_acc, ".5f"), Average_FLOPS=format(model_flops.mean().item(), ".3f"))
             else:
                 logprog.update(loss=format(total_loss / (i + 1), ".5f"),
                                accuracy=format(total_acc, ".5f"))

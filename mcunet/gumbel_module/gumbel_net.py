@@ -12,43 +12,24 @@ from ..tinynas.nn.networks import MobileInvertedResidualBlock
 
 from .gumbel_layer import MBGumbelInvertedConvLayer, MobileGumbelInvertedResidualBlock
 
-from ..utils import MyModule, MyNetwork, SEModule, build_activation, get_same_padding, sub_filter_start_end, rm_bn_from_net
+from ..utils import MyModule, MyNetwork, SEModule, build_activation, get_same_padding, sub_filter_start_end, rm_bn_from_net, has_deep_attr, get_deep_attr, set_deep_attr
 from ..tinynas.nn.modules import ZeroLayer, set_layer_from_config
 
-
-
-def get_deep_attr(obj, attrs):
-    for attr in attrs.split("."):
-        obj = getattr(obj, attr)
-    return obj
-
-def has_deep_attr(obj, attrs):
-    try:
-        get_deep_attr(obj, attrs)
-        return True
-    except AttributeError:
-        return False
-
-def set_deep_attr(obj, attrs, value):
-    for attr in attrs.split(".")[:-1]:
-        obj = getattr(obj, attr)
-    setattr(obj, attrs.split(".")[-1], value)
-    
         
         
-class GumbelMCUNets(MyNetwork):
-    def __init__(self, first_conv, blocks, feature_mix_layer, classifier, gumbel_feature_extract_block):
-        super(GumbelMCUNets, self).__init__()
+class GumbelMCUNet(MyNetwork):
+    def __init__(self, first_conv, blocks, feature_mix_layer, classifier, gumbel_feature_extract_block_idx):
+        super(GumbelMCUNet, self).__init__()
         
         self.first_conv = first_conv
         self.blocks = nn.ModuleList(blocks)
         self.feature_mix_layer = feature_mix_layer
         self.classifier = classifier
-        self.gumbel_feature_extract_block = gumbel_feature_extract_block
+        self.gumbel_feature_extract_block_idx = gumbel_feature_extract_block_idx
         
         self.gumbel_index_list = []
         for i, block in enumerate(self.blocks):
-            if i < self.gumbel_feature_extract_block:
+            if i < self.gumbel_feature_extract_block_idx:
                 continue
             if len(block.mobile_inverted_conv.expand_ratio_list) > 1:
                 self.gumbel_index_list.append(len(block.mobile_inverted_conv.expand_ratio_list))
@@ -57,7 +38,7 @@ class GumbelMCUNets(MyNetwork):
                 self.gumbel_index_list.append(len(block.mobile_inverted_conv.kernel_size_list))
         
         
-        self.gumbel_input_channel = blocks[gumbel_feature_extract_block].mobile_inverted_conv.out_channels
+        self.gumbel_input_channel = blocks[gumbel_feature_extract_block_idx].mobile_inverted_conv.out_channels
         
         self.avgpool_policy = nn.AdaptiveAvgPool2d((8, 8))
         self.gumbel_features_flatten = nn.Flatten()
@@ -75,7 +56,7 @@ class GumbelMCUNets(MyNetwork):
     def forward(self, x):
         x = self.first_conv(x)
         for i, block in enumerate(self.blocks):            
-            if i == self.gumbel_feature_extract_block:
+            if i == self.gumbel_feature_extract_block_idx:
                 # feautre map and gumbel output extract
                 gumbel_output = self.gumbel_block(x)
                 gumbel_output = gumbel_output.view(-1, sum(self.gumbel_index_list))
@@ -84,7 +65,7 @@ class GumbelMCUNets(MyNetwork):
 
         gumbel_index = 0
         gumbel_one_hot_list = []
-        for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block:]):
+        for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block_idx:]):
             expand_index, kernel_index = len(block.mobile_inverted_conv.expand_ratio_list), len(block.mobile_inverted_conv.kernel_size_list)
             if self.training:            
                 if expand_index > 1 and kernel_index > 1:
@@ -151,7 +132,7 @@ class GumbelMCUNets(MyNetwork):
         flops += FlopCountAnalysis(self.first_conv, x).total()
         x = self.first_conv(x)
         for i, block in enumerate(self.blocks):
-            if i == self.gumbel_feature_extract_block:
+            if i == self.gumbel_feature_extract_block_idx:
                 # feautre map and gumbel output extract
                 gumbel_output = self.gumbel_block(x)
                 gumbel_output = gumbel_output.view(-1, sum(self.gumbel_index_list))
@@ -166,7 +147,7 @@ class GumbelMCUNets(MyNetwork):
         self.static_flops = flops
         self.dynamic_flops = 0
         flops = 0
-        for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block:]):
+        for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block_idx:]):
             rm_bn_block = copy.deepcopy(block)
             rm_bn_from_net(rm_bn_block)
             flops += FlopCountAnalysis(rm_bn_block, x).total()
@@ -185,10 +166,9 @@ class GumbelMCUNets(MyNetwork):
         self.static_flops += flops
         print(f"Success Log Static & Dynamic Flops : {self.static_flops}, {self.dynamic_flops}")
         
-    def compute_flops(self, x, gumbel_one_hot_list):
+    def compute_flops(self, gumbel_one_hot_list):
         flops = 0
-        batch_size = x[0]
-        for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block:]):
+        for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block_idx:]):
             expand_index, kernel_index = len(block.mobile_inverted_conv.expand_ratio_list), len(block.mobile_inverted_conv.kernel_size_list)
             if expand_index > 1 and kernel_index > 1:
                 flops += block.count_flops(gumbel_one_hot_list[j])
@@ -196,8 +176,9 @@ class GumbelMCUNets(MyNetwork):
                 flops += block.count_flops(gumbel_one_hot_list[j])
             elif kernel_index >1:
                 flops += block.count_flops(gumbel_one_hot_list[j])
-            else:
-                flops += block.compute_flops(x)
+            #else:
+            #    flops += block.compute_flops(x)
+        flops = flops * 1e-6 # MFLOPs
         return flops
     
     @property
@@ -212,7 +193,7 @@ class GumbelMCUNets(MyNetwork):
     @property
     def config(self):
         return {
-            'name': GumbelMCUNets.__name__,
+            'name': GumbelMCUNet.__name__,
             'bn': self.get_bn_param(),
             'first_conv': self.first_conv.config,
             'blocks': [
@@ -227,7 +208,7 @@ class GumbelMCUNets(MyNetwork):
     def build_from_config(net_config, gumbel_config):
         MBGumbelInvertedConvLayer.global_expand_ratio_list = gumbel_config['global_expand_ratio_list']
         MBGumbelInvertedConvLayer.global_kernel_size_list = gumbel_config['global_kernel_size_list']
-        gumbel_feature_extract_block = gumbel_config['gumbel_feature_extract_block']
+        gumbel_feature_extract_block_idx = gumbel_config['gumbel_feature_extract_block_idx']
         
         first_conv = set_layer_from_config(net_config['first_conv'])
         feature_mix_layer = set_layer_from_config(net_config['feature_mix_layer'])
@@ -236,12 +217,12 @@ class GumbelMCUNets(MyNetwork):
         blocks = []
         
         for i, block_config in enumerate(net_config['blocks']):
-            if i < gumbel_feature_extract_block:
+            if i < gumbel_feature_extract_block_idx:
                 blocks.append(MobileInvertedResidualBlock.build_from_config(block_config))
             else:
                 blocks.append(MobileGumbelInvertedResidualBlock.build_from_config(block_config))
         
-        net = GumbelMCUNets(first_conv, blocks, feature_mix_layer, classifier, gumbel_feature_extract_block)
+        net = GumbelMCUNet(first_conv, blocks, feature_mix_layer, classifier, gumbel_feature_extract_block_idx)
         
         if 'bn' in net_config:
             net.set_bn_param(**net_config['bn'])

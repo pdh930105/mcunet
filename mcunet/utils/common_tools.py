@@ -12,11 +12,30 @@ except ImportError:
     from urllib.request import urlretrieve
 
 __all__ = [
+    'get_deep_attr', 'set_deep_attr', 'has_deep_attr',
     'sort_dict', 'get_same_padding',
     'get_split_list', 'list_sum', 'list_mean', 'list_join',
     'subset_mean', 'sub_filter_start_end', 'min_divisible_value', 'val2list',
     'download_url', 'accuracy', 'AverageMeter'
 ]
+
+def get_deep_attr(obj, attrs):
+    for attr in attrs.split("."):
+        obj = getattr(obj, attr)
+    return obj
+
+def has_deep_attr(obj, attrs):
+    try:
+        get_deep_attr(obj, attrs)
+        return True
+    except AttributeError:
+        return False
+
+def set_deep_attr(obj, attrs, value):
+    for attr in attrs.split(".")[:-1]:
+        obj = getattr(obj, attr)
+    setattr(obj, attrs.split(".")[-1], value)
+
 
 
 def sort_dict(src_dict, reverse=False, return_dict=True):
@@ -127,7 +146,6 @@ def accuracy(output, target, topk=(1,)):
         correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
         res.append(correct_k.mul_(100.0 / batch_size).mean())
     return res
-
 
 class AverageMeter(object):
     """

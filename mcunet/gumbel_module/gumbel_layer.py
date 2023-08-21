@@ -118,7 +118,6 @@ class MBGumbelInvertedConvLayer(MyModule):
             x = self.point_linear(x)
             return x
         else:
-            print(gumbel)
             if len(self.expand_ratio_list) == 1: ## 
                 if len(self.kernel_size_list) == 1:
                     if self.inverted_bottleneck:
@@ -168,7 +167,6 @@ class MBGumbelInvertedConvLayer(MyModule):
                     expand_max_out = self.inverted_bottleneck.act(expand_max_out)
                     expand_max_out *= gumbel[:, -1].unsqueeze(1).unsqueeze(2).unsqueeze(3)
                     for i, expand_ratio in enumerate(self.expand_ratio_list[:-1]):
-                        print(i, expand_ratio)
                         out = F.conv2d(x, expand_weight[:expand_ratio*self.in_channels, :, :, :], stride=1, padding=0)
                         out = F.batch_norm(out, self.inverted_bottleneck.bn.running_mean[:expand_ratio*self.in_channels], self.inverted_bottleneck.bn.running_var[:expand_ratio*self.in_channels], self.inverted_bottleneck.bn.weight[:expand_ratio*self.in_channels], self.inverted_bottleneck.bn.bias[:expand_ratio*self.in_channels], self.inverted_bottleneck.bn.training, self.inverted_bottleneck.bn.momentum, self.inverted_bottleneck.bn.eps)
                         out = self.inverted_bottleneck.act(out)
@@ -226,15 +224,22 @@ class MBGumbelInvertedConvLayer(MyModule):
                 assert False, "gumbel size is not match with expand_ratio_list and kernel_size_list"
 
 
+    def compute_flops(self):
+        assert hasattr(self, 'input_width'), "please run forward at least once"
+        flops = 0
+        self.inverted_flops = count_conv_gumbel_flops(self.inverted_bottleneck.conv.weight.shape, self.input_width, self.input_height)
+        self.dw_flops = count_conv_gumbel_flops(self.depth_conv.conv.weight.shape, self.input_width, self.input_height, stride = self.depth_conv.conv.stride[0])
+        self.pw_flops = count_conv_gumbel_flops(self.point_linear.conv.weight.shape, self.input_width / self.depth_conv.conv.stride[0], self.input_height / self.depth_conv.conv.stride[0])
+        
+        return self.inverted_flops + self.dw_flops + self.pw_flops
+    
     def compute_gumbel_flops(self, gumbel_idx=None):
         
         assert hasattr(self, 'input_width'), "please run forward at least once"
         
         if self.initialize_flops == False:
-            print("initialize FLOPs table")        
-            if len(self.expand_ratio_list) == 1 and len(self.kernel_size_list) == 1:
+            if (len(self.expand_ratio_list) == 1 and len(self.kernel_size_list) == 1) or gumbel_idx==None:
                 print("expand ratio list = 1, kernel size list = 1")
-                
                 inverted_flops = 0
                 if self.inverted_bottleneck:
                     inverted_flops += count_conv_gumbel_flops(self.inverted_bottleneck.conv.weight.shape, self.input_width, self.input_height)
@@ -282,50 +287,63 @@ class MBGumbelInvertedConvLayer(MyModule):
                 self.inverted_flops = inverted_flops_tensor
                 dw_flops_tensor = torch.zeros(len(self.expand_ratio_list), dtype=torch.float32).to(self.depth_conv.conv.weight.device)
                 for i, expand in enumerate(self.expand_ratio_list):
-                    out_c, in_c, h, w = self.depth_conv.conv.weight.shape
-                    dw_flops = count_conv_gumbel_flops((in_c*expand, in_c, h, w), self.input_width, self.input_height, self.depth_conv.conv.stride[0])
+                    _, _, h, w = self.depth_conv.conv.weight.shape
+                    dw_flops = count_conv_gumbel_flops((in_c*expand, 1, h, w), self.input_width, self.input_height, self.depth_conv.conv.stride[0])
                     dw_flops_tensor[i] += dw_flops
                 print("dw blocks flops :", dw_flops_tensor)                   
                 self.dw_flops = dw_flops_tensor
                 pw_flops_tensor = torch.zeros(len(self.expand_ratio_list), dtype=torch.float32).to(self.depth_conv.conv.weight.device)
                 for i, expand in enumerate(self.expand_ratio_list):
-                    out_c, in_c, h, w = self.point_linear.conv.weight.shape
+                    out_c, _, h, w = self.point_linear.conv.weight.shape
                     pw_flops = count_conv_gumbel_flops((out_c, in_c*expand, h, w), self.input_width, self.input_height, self.depth_conv.conv.stride[0])
                     pw_flops_tensor[i] += pw_flops
                 print("pw blocks flops :", pw_flops_tensor)
                 self.pw_flops = pw_flops_tensor
             
             else: # expand_ratio_list > 1 and kernel_size_list > 1
+                """
+                print("^^"*20)
                 print(f"expand ratio list > 1 ({len(self.expand_ratio_list)}), kernel size list > 1 ({len(self.kernel_size_list)})")
+                print(f"module config")
+                print(f"input h/w : {self.input_height} / {self.input_width}")
+                print(f"stride : {self.depth_conv.conv.stride[0]}")
+                print(f"inverted conv input shape : {self.inverted_bottleneck.conv.weight.shape}")
+                print(f"depth conv weight shape : {self.depth_conv.conv.weight.shape}")
+                print(f"point conv weight shape : {self.point_linear.conv.weight.shape}")
+                print(f"max expand size : {self.max_expand_ratio}")
+                print(f"max kernel size : {self.max_kernel_size}")
+                print(f"expand ratio check :", self.max_expand_ratio * self.inverted_bottleneck.conv.weight.shape[1] == self.depth_conv.conv.weight.shape[0])
+                print("^^"*20)
+                """
                 inverted_flops_tensor = torch.zeros(len(self.expand_ratio_list), dtype=torch.float32).to(self.depth_conv.conv.weight.device)
                 for i, expand in enumerate(self.expand_ratio_list):
                     out_c, in_c, h, w = self.inverted_bottleneck.conv.weight.shape
                     inverted_flops_tensor[i] = count_conv_gumbel_flops((in_c*expand, in_c, h, w), self.input_width, self.input_height)
-                print("inverted blocks flops :", inverted_flops_tensor)                   
+                #print("inverted blocks flops :", inverted_flops_tensor)                   
                 self.inverted_flops = inverted_flops_tensor
                 dw_flops_tensor = torch.zeros(len(self.kernel_size_list), dtype=torch.float32).to(self.depth_conv.conv.weight.device)
                 convert_flops_tensor = torch.zeros(len(self.kernel_size_list), dtype=torch.float32).to(self.depth_conv.conv.weight.device)
                 for i, kernel in enumerate(self.kernel_size_list):
                     if kernel == self.max_kernel_size:
-                        dw_flops_tensor[i] = count_conv_gumbel_flops(self.depth_conv.conv.weight.shape, self.input_width, self.input_height, self.depth_conv.conv.stride[0])
+                        dw_flops_tensor[i] = count_conv_gumbel_flops(self.depth_conv.conv.weight.shape, self.input_width, self.input_height, stride=self.depth_conv.conv.stride[0])
                         convert_flops_tensor[i] = 0
                     else:
-                        out_c, in_c, h, w = self.depth_conv.conv.weight.shape
+                        out_c, _, h, w = self.depth_conv.conv.weight.shape
                         convert_flops = self.convert_kernel_flops(kernel)
-                        compute_flops = count_conv_gumbel_flops((out_c, in_c, kernel, kernel), self.input_width, self.input_height, self.depth_conv.conv.stride[0])
+                        compute_flops = count_conv_gumbel_flops((out_c, 1, kernel, kernel), self.input_width, self.input_height, stride= self.depth_conv.conv.stride[0])
                         convert_flops_tensor[i] = convert_flops
                         dw_flops_tensor[i] = compute_flops
                         
-                print("dw convert flops :, ", convert_flops_tensor)                
-                print("dw blocks flops :", dw_flops_tensor)
+                #print("dw convert flops :, ", convert_flops_tensor)                
+                #print("dw blocks flops :", dw_flops_tensor)
                 self.convert_flops = convert_flops_tensor
                 self.dw_flops = dw_flops_tensor
                 pw_flops_tensor = torch.zeros(len(self.expand_ratio_list), dtype=torch.float32).to(self.depth_conv.conv.weight.device)
                 for i, expand in enumerate(self.expand_ratio_list):
-                    out_c, in_c, h, w = self.point_linear.conv.weight.shape
-                    pw_flops = count_conv_gumbel_flops((out_c, in_c*expand, h, w), self.input_width, self.input_height, self.depth_conv.conv.stride[0])
+                    out_c, _, h, w = self.point_linear.conv.weight.shape
+                    pw_flops = count_conv_gumbel_flops((out_c, in_c*expand, h, w), self.input_width, self.input_height, stride=self.depth_conv.conv.stride[0])
                     pw_flops_tensor[i] += pw_flops
-                print("pw blocks flops :", pw_flops_tensor)
+                #print("pw blocks flops :", pw_flops_tensor)
                 self.pw_flops = pw_flops_tensor
             
             self.initialize_flops = True
