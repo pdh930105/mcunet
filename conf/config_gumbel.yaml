@@ -61,7 +61,7 @@ gumbel:
  global_kernel_size_list: [3, 5, 7]
  gumbel_feature_extract_block_idx: 2 
 
-flops_penalty: 0.0001
+flops_penalty: 0.001
 
 
 rendezvous_file: ./rendezvous

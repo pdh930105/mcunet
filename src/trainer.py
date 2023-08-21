@@ -128,6 +128,11 @@ class Trainer(object):
 
         for epoch in range(len(self.history), self.epochs):
             # Train one epoch
+            if epoch == 0:
+                print("Test pretrained original model")
+                self.model.eval()
+                self.test(ori_model=True)    
+            
             self.model.train()  # Turn on BatchNorm & Dropout
             start = time.time()
             logger.info('-' * 70)
@@ -189,7 +194,40 @@ class Trainer(object):
                     self._serialize(self.checkpoint)
                     logger.debug("Checkpoint saved to %s", self.checkpoint.resolve())
 
-    def _run_one_epoch(self, epoch, cross_valid=False):
+
+    def test(self, ori_model=False):
+        # Optimizing the model
+        self.model.eval()
+        
+        start = time.time()
+        with torch.no_grad():
+            valid_loss, valid_acc = self._run_one_epoch(0, cross_valid=True, ori_model=ori_model)
+        print(f'Valid Summary | End of Epoch {1} | '
+                            f'Time {time.time() - start:.2f}s | valid Loss {valid_loss:.5f} | '
+                            f'valid accuracy {valid_acc:.2f}')
+        logger.info(bold(f'Valid Summary | End of Epoch {1} | '
+                            f'Time {time.time() - start:.2f}s | valid Loss {valid_loss:.5f} | '
+                            f'valid accuracy {valid_acc:.2f}'))
+
+
+        best_loss = float('inf')
+        best_size = 0
+        best_acc = 0
+        for metrics in self.history:
+            if metrics['valid'] < best_loss:
+                best_size = metrics['model_flops']
+                best_acc = metrics['valid_acc']
+                best_loss = metrics['valid']
+        metrics = {'valid': valid_loss, 'valid_acc': valid_acc,
+                    'best': best_loss, 'best_size': best_size, 'best_acc': best_acc,
+                    }
+
+            # Save the best model
+        if valid_loss == best_loss:
+            logger.info(bold('New best valid loss %.4f'), valid_loss)
+            self.best_state = copy_state(self.model.state_dict())
+
+    def _run_one_epoch(self, epoch, cross_valid=False, ori_model=False):
         total_loss = 0
         avg_flops = 0
         total = 0
@@ -211,7 +249,17 @@ class Trainer(object):
                         loss = loss + self.flops_penalty * model_flops.mean()
             else:
                 # compute output
-                yhat, gumbel_idx = self.dmodel(inputs)
+                if ori_model:
+                    if hasattr(self.dmodel, 'module'):
+                        if hasattr(self.dmodel.module, 'forward_original'):
+                            
+                            yhat = self.dmodel.module.forward_original(inputs)
+                    elif hasattr(self.dmodel, 'forward_original'):
+                        yhat = self.dmodel.forward_original(inputs)                    
+                    else:
+                        yhat = self.dmodel(inputs)
+                else:
+                    yhat, gumbel_idx = self.dmodel(inputs)
                 loss = self.criterion(yhat, targets)
 
             if not cross_valid:
@@ -240,6 +288,8 @@ class Trainer(object):
             correct += predicted.eq(targets).sum().item()
             
             total_acc = 100. * (correct / total)
+            if cross_valid:
+                print(f"total_loss : {total_loss} total_acc : {total_acc}")
             if not cross_valid:
                 logprog.update(
                     loss=format(total_loss / (i + 1), ".5f"),

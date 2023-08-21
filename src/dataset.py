@@ -52,17 +52,18 @@ def get_loader(args, img_resize):
         num_classes = 100
     elif args.db.name.lower() == 'imagenet':
         transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(224),
+            transforms.RandomResizedCrop(int(img_resize*256 / 224)),
             transforms.Resize(img_resize),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
         transform_test = transforms.Compose([
-            transforms.CenterCrop(224),
-            transforms.Resize(img_resize),
+            #transforms.CenterCrop(256),
+            transforms.Resize(int(img_resize*256 / 224)),
+            transforms.CenterCrop(img_resize),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
         train_path = pathlib.Path(args.db.root) / 'train'
         test_path = pathlib.Path(args.db.root) / 'val'

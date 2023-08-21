@@ -49,7 +49,8 @@ def run(args):
     rm_bn_from_net(model)
     original_flops = FlopCountAnalysis(model, torch.randn(1, 3, img_resize, img_resize)).total()
     logger.info("Original Flops: %.2f M", original_flops / 1e6)
-    
+
+    del model
     
     criterion = nn.CrossEntropyLoss()
     if torch.cuda.is_available():

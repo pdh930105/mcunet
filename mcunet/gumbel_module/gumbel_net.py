@@ -89,9 +89,13 @@ class GumbelMCUNet(MyNetwork):
         
             else:
                 if expand_index > 1 and kernel_index > 1:
-                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index  + kernel_index]
-                    index = gumbel_input.max(dim=-1, keepdim=True)[1]
-                    gumbel_one_hot = torch.zeros_like(gumbel_input, memory_format=torch.legacy_contiguous_format).scatter_(-1, index, 1.0)
+                    gumbel_input_expand = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
+                    gumbel_one_hot_expand = gumbel_input_expand.max(dim=-1, keepdim=True)[1]
+                    gumbel_one_hot_expand = torch.zeros_like(gumbel_input_expand, memory_format=torch.legacy_contiguous_format).scatter_(-1, gumbel_one_hot_expand, 1.0)
+                    gumbel_input_kernel = gumbel_output[:, gumbel_index + expand_index: gumbel_index + expand_index + kernel_index]
+                    gumbel_one_hot_kernel = gumbel_input_kernel.max(dim=-1, keepdim=True)[1]
+                    gumbel_one_hot_kernel = torch.zeros_like(gumbel_input_kernel, memory_format=torch.legacy_contiguous_format).scatter_(-1, gumbel_one_hot_kernel, 1.0)
+                    gumbel_one_hot = torch.cat([gumbel_one_hot_expand, gumbel_one_hot_kernel], dim=-1)                    
                     gumbel_index += expand_index + kernel_index
                     
                 elif expand_index > 1:
@@ -106,6 +110,7 @@ class GumbelMCUNet(MyNetwork):
                     gumbel_index += kernel_index
                 else:
                     gumbel_one_hot = None
+                #print("check gumbel one hot :", gumbel_one_hot)
                 x = block(x, gumbel_one_hot)
             
             gumbel_one_hot_list.append(gumbel_one_hot)    
@@ -236,6 +241,10 @@ class GumbelMCUNet(MyNetwork):
         for n, p in self.named_parameters():
             if has_deep_attr(mcunet, n):
                 set_deep_attr(self, n, get_deep_attr(mcunet, n))
-                
+        
+        for n, p in self.named_buffers():
+            if has_deep_attr(mcunet, n):
+                set_deep_attr(self, n, get_deep_attr(mcunet, n))
+        
         print(f"load pretrained mcumodel to gumbel net")
         
