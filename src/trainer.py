@@ -10,8 +10,11 @@ import os
 import time
 
 import torch
+import torch.nn as nn
 import src.distrib as distrib
 from src.utils import bold, copy_state, LogProgress
+from mcunet.gumbel_module.gumbel_layer import MBGumbelInvertedConvLayer
+from mcunet.utils.common_tools import has_deep_attr, get_deep_attr, set_deep_attr
 
 
 logger = logging.getLogger(__name__)
@@ -126,22 +129,45 @@ class Trainer(object):
             if self.sched is not None:
                 self.sched.step()
 
+        
         for epoch in range(len(self.history), self.epochs):
             # Train one epoch
             if epoch == 0:
                 print("Test pretrained original model")
                 self.model.eval()
-                self.test(ori_model=True)    
+                self.test(ori_model=True)
             
             self.model.train()  # Turn on BatchNorm & Dropout
+            
+            # # bn statistics freeze
+            # for n, m in self.model.named_modules():
+            #     if has_deep_attr(m, 'bn'):
+            #         get_deep_attr(m, 'bn').eval()
+            #     if isinstance(m, nn.BatchNorm2d):
+            #         m.eval()
+                                                
+            
             start = time.time()
             logger.info('-' * 70)
             logger.info("Training...")
             
+            # for i, (n, b) in enumerate(self.dmodel.named_buffers()):
+            #     print("before bn params")
+            #     logger.info(f"{n} : {b}")
+            #     if i > 10:
+            #         break
             train_loss, train_acc = self._run_one_epoch(epoch)
             logger.info(bold(f'Train Summary | End of Epoch {epoch + 1} | '
                               f'Time {time.time() - start:.2f}s | train loss {train_loss:.5f} | '
                               f'train accuracy {train_acc:.2f}'))
+            
+            
+            # for i, (n, b) in enumerate(self.dmodel.named_buffers()):
+            #     print("after bn params")
+            #     if 'running' in n:
+            #         logger.info(f"{n} : {b}")
+            #     if i > 10:
+            #         break
             
             # # Cross validation
             logger.info('-' * 70)
@@ -150,10 +176,12 @@ class Trainer(object):
 
             with torch.no_grad():
                 valid_loss, valid_acc = self._run_one_epoch(epoch, cross_valid=True)
-            logger.info(bold(f'Valid Summary | End of Epoch {epoch + 1} | '
+            logger.info(bold(f'Valid (Using gumbel) Summary | End of Epoch {epoch + 1} | '
                              f'Time {time.time() - start:.2f}s | valid Loss {valid_loss:.5f} | '
                              f'valid accuracy {valid_acc:.2f}'))
 
+            with torch.no_grad():
+                self.test(ori_model=True) # test without gumbel output
             # learning rate scheduling
             if self.sched:
                 if self.args.lr_sched == 'plateau':
@@ -195,9 +223,13 @@ class Trainer(object):
                     logger.debug("Checkpoint saved to %s", self.checkpoint.resolve())
 
 
-    def test(self, ori_model=False):
+    def test(self, ori_model=False, train_mode =False):
+        
         # Optimizing the model
-        self.model.eval()
+        if train_mode:
+            self.model.train()
+        else:
+            self.model.eval()
         
         start = time.time()
         with torch.no_grad():
@@ -227,9 +259,10 @@ class Trainer(object):
             logger.info(bold('New best valid loss %.4f'), valid_loss)
             self.best_state = copy_state(self.model.state_dict())
 
+
     def _run_one_epoch(self, epoch, cross_valid=False, ori_model=False):
         total_loss = 0
-        avg_flops = 0
+        model_flops = torch.Tensor([0])
         total = 0
         correct = 0
         data_loader = self.tr_loader if not cross_valid else self.tt_loader
@@ -242,24 +275,30 @@ class Trainer(object):
             inputs, targets = inputs.to(self.device), targets.to(self.device)
             if not cross_valid:
                 with torch.cuda.amp.autocast(bool(self.args.mixed)):
-                    yhat, gumbel_idx = self.dmodel(inputs)
+                    # yhat, gumbel_idx = self.dmodel(inputs)
+                    # loss = self.criterion(yhat, targets)
+                    # model_flops = self.dmodel.module.compute_flops(gumbel_idx)
+                    # if self.flops_penalty > 0:
+                    #     loss = loss + self.flops_penalty * model_flops.mean()
+                    
+                    yhat, gumbel_idx = self.dmodel.module.forward_gumbel_approx(inputs)
                     loss = self.criterion(yhat, targets)
-                    model_flops = self.dmodel.module.compute_flops(gumbel_idx)
-                    if self.flops_penalty > 0:
-                        loss = loss + self.flops_penalty * model_flops.mean()
+            
+                if i > 125:
+                    break
+            
             else:
                 # compute output
                 if ori_model:
                     if hasattr(self.dmodel, 'module'):
-                        if hasattr(self.dmodel.module, 'forward_original'):
-                            
-                            yhat = self.dmodel.module.forward_original(inputs)
-                    elif hasattr(self.dmodel, 'forward_original'):
-                        yhat = self.dmodel.forward_original(inputs)                    
+                        if hasattr(self.dmodel.module, 'forward_gumbel_approx'):
+                            yhat, gumbel_idx = self.dmodel.module.forward_gumbel_approx(inputs)
+                    elif hasattr(self.dmodel, 'forward_gumbel_approx'):
+                        yhat, gumbel_idx = self.dmodel.forward_gumbel_approx(inputs)                    
                     else:
-                        yhat = self.dmodel(inputs)
+                        yhat, gumbel_idx = self.dmodel.module.forward_gumbel_approx(inputs)
                 else:
-                    yhat, gumbel_idx = self.dmodel(inputs)
+                    yhat, gumbel_idx = self.dmodel.module.forward_gumbel_approx(inputs)
                 loss = self.criterion(yhat, targets)
 
             if not cross_valid:
@@ -299,5 +338,6 @@ class Trainer(object):
                                accuracy=format(total_acc, ".5f"))
             # Just in case, clear some memory
             del loss
+            
         return (distrib.average([total_loss / (i + 1)], i + 1)[0],
                 distrib.average([total_acc], total)[0])

@@ -19,7 +19,36 @@ def count_conv_gumbel_flops(weight_shape, width, height, batch=1, stride=1):
         stride = stride[0]
     flops = batch * out_c * width * height * in_c * k_w * k_h / stride / stride
     return flops
+
+class DynamicGumbelBatchNorm2d(nn.Module):
+    SET_RUNNING_STATISTICS = False
     
+    def __init__(self, max_feature_dim, **kwargs):
+        super(DynamicGumbelBatchNorm2d, self).__init__()
+        self.max_feature_dim = max_feature_dim
+        self.bn = nn.BatchNorm2d(self.max_feature_dim)
+        
+    @staticmethod
+    def bn_forward(x, bn: nn.BatchNorm2d, feature_dim):
+        if bn.num_features == feature_dim or DynamicGumbelBatchNorm2d.SET_RUNNING_STATISTICS:
+            return bn(x)
+        else:
+            exponential_average_factor = 0.0
+            
+            if bn.training and bn.track_running_stats:
+                if bn.num_batches_tracked is not None:
+                    bn.num_batches_tracked += 1
+                if bn.momentum is None: # use cumulative moving average
+                    exponential_average_factor = 1.0 / float(bn.num_batches_tracked)
+                else: # use exponential moving average
+                    exponential_average_factor = bn.momentum
+            return F.batch_norm(x, bn.running_mean[:feature_dim], bn.running_var[:feature_dim], bn.weight[:feature_dim], bn.bias[:feature_dim], 
+                                bn.training or not bn.track_running_stats, exponential_average_factor, bn.eps)
+    
+    def forward(self, x):
+        feature_dim = x.size(1)
+        y = self.bn_forward(x, self.bn, feature_dim)
+        return y
 
 class MBGumbelInvertedConvLayer(MyModule):
     global_kernel_size_list = [3,5,7]
@@ -42,7 +71,6 @@ class MBGumbelInvertedConvLayer(MyModule):
 
         kernel_size_list = []
         expand_ratio_list = []
-        
         
         if self.max_kernel_size in self.global_kernel_size_list:
             for kernel in sorted(self.global_kernel_size_list):

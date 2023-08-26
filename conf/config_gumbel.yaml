@@ -31,7 +31,7 @@ optim: sgd
 lr: 0.001
 momentum: 0.9
 w_decay: 5e-4
-batch_size: 1024
+batch_size: 2048
 mixed: True  # if true, uses mixed precision training
 beta2: 0.999
 max_norm: 5
@@ -63,6 +63,7 @@ gumbel:
 
 flops_penalty: 0.001
 
+log:''
 
 rendezvous_file: ./rendezvous
 ddp: True  # if set to true, uses all available GPUs.
@@ -72,7 +73,7 @@ world_size: 4
 # Hydra config
 hydra:
   run:
-    dir: ./outputs/exp_${hydra.job.override_dirname}
+    dir: ./outputs/exp_${log}/${hydra.job.override_dirname}
   job:
     config:
       # configuration for the ${hydra.job.override_dirname} runtime variable

@@ -40,11 +40,15 @@ def run(args):
     gumbel_model.load_pretrained_mcunet_param(model)
     logger.info("load pretrained MCUModel to GumbelMCUNets")
     
-    if args.optim == 'adam':
-        
-        optimizer = torch.optim.Adam(gumbel_model.parameters(), lr=args.lr, betas=(0.9, args.beta2))
+    train_parameters = [p for n, p in gumbel_model.named_parameters() if p.requires_grad]
+    # train_parameters = [p for n, p in gumbel_model.named_parameters() if p.requires_grad and 'bn' not in n]
+    # train_parameters = [p for n, p in gumbel_model.named_parameters() if 'kernel_transform_linear_list' in n]
+    # train_parameters += [p for n, p in gumbel_model.gumbel_features_flatten.named_parameters() if p.requires_grad]
+    
+    if args.optim == 'adam':        
+        optimizer = torch.optim.Adam(train_parameters, lr=args.lr, betas=(0.9, args.beta2))
     elif args.optim == 'sgd':
-        optimizer = torch.optim.SGD(gumbel_model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.w_decay)
+        optimizer = torch.optim.SGD(train_parameters, lr=args.lr, momentum=args.momentum, weight_decay=args.w_decay)
     
     rm_bn_from_net(model)
     original_flops = FlopCountAnalysis(model, torch.randn(1, 3, img_resize, img_resize)).total()

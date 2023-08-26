@@ -67,6 +67,29 @@ class GumbelMCUNet(MyNetwork):
         gumbel_one_hot_list = []
         for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block_idx:]):
             expand_index, kernel_index = len(block.mobile_inverted_conv.expand_ratio_list), len(block.mobile_inverted_conv.kernel_size_list)
+            
+            if expand_index > 1 and kernel_index > 1:
+                    gumbel_input_expand = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
+                    gumbel_one_hot_expand = F.gumbel_softmax(gumbel_input_expand, tau=1, hard=True)
+                    gumbel_input_kernel = gumbel_output[:, gumbel_index + expand_index: gumbel_index + expand_index + kernel_index]
+                    gumbel_one_hot_kernel = F.gumbel_softmax(gumbel_input_kernel, tau=1, hard=True)
+                    gumbel_one_hot = torch.cat([gumbel_one_hot_expand, gumbel_one_hot_kernel], dim=-1)
+                    gumbel_index += expand_index + kernel_index
+            elif expand_index > 1:
+                gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
+                gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
+                gumbel_index += expand_index
+            elif kernel_index >1:
+                gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + kernel_index]
+                gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
+                gumbel_index += kernel_index
+            else:
+                gumbel_one_hot = None
+            x = block(x, gumbel_one_hot)
+            gumbel_one_hot_list.append(gumbel_one_hot)    
+            
+            """
+            # original backup
             if self.training:            
                 if expand_index > 1 and kernel_index > 1:
                     gumbel_input_expand = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
@@ -115,13 +138,101 @@ class GumbelMCUNet(MyNetwork):
             
             gumbel_one_hot_list.append(gumbel_one_hot)    
                 
-        
+        """
         if self.feature_mix_layer is not None:
             x = self.feature_mix_layer(x)
         x = x.mean(3).mean(2)
         x = self.classifier(x)
         return x, gumbel_one_hot_list
+
+    # forward gumbel one hot but it same gumbel_original
+    def forward_gumbel_approx(self, x):
+        x = self.first_conv(x)
+        for i, block in enumerate(self.blocks):            
+            if i == self.gumbel_feature_extract_block_idx:
+                # feautre map and gumbel output extract
+                break
+            x = block(x)
+
+        gumbel_index = 0
+        gumbel_one_hot_list = []
+        for j, block in enumerate(self.blocks[self.gumbel_feature_extract_block_idx:]):
+            expand_index, kernel_index = len(block.mobile_inverted_conv.expand_ratio_list), len(block.mobile_inverted_conv.kernel_size_list)
+            
+            if expand_index > 1 and kernel_index > 1:
+                gumbel_one_hot = torch.zeros((x.shape[0], expand_index + kernel_index), device=x.device)
+                gumbel_one_hot[:, expand_index -1] = 1
+                gumbel_one_hot[:, expand_index] = 1
+                
+                gumbel_index += expand_index + kernel_index
+            elif expand_index > 1:
+                gumbel_one_hot = torch.zeros((x.shape[0], expand_index), device=x.device)
+                gumbel_one_hot[:, expand_index -1] = 1
+            elif kernel_index >1:
+                gumbel_one_hot = torch.zeros((x.shape[0], kernel_index), device=x.device)
+                gumbel_one_hot[:, 0] = 1
+            else:
+                gumbel_one_hot = None
+            x = block(x, gumbel_one_hot)
+            gumbel_one_hot_list.append(gumbel_one_hot)    
+            
+            """
+            # original backup
+            if self.training:            
+                if expand_index > 1 and kernel_index > 1:
+                    gumbel_input_expand = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
+                    gumbel_one_hot_expand = F.gumbel_softmax(gumbel_input_expand, tau=1, hard=True)
+                    gumbel_input_kernel = gumbel_output[:, gumbel_index + expand_index: gumbel_index + expand_index + kernel_index]
+                    gumbel_one_hot_kernel = F.gumbel_softmax(gumbel_input_kernel, tau=1, hard=True)
+                    gumbel_one_hot = torch.cat([gumbel_one_hot_expand, gumbel_one_hot_kernel], dim=-1)
+                    gumbel_index += expand_index + kernel_index
+                elif expand_index > 1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
+                    gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
+                    gumbel_index += expand_index
+                elif kernel_index >1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + kernel_index]
+                    gumbel_one_hot = F.gumbel_softmax(gumbel_input, tau=1, hard=True)
+                    gumbel_index += kernel_index
+                else:
+                    gumbel_one_hot = None
+                x = block(x, gumbel_one_hot)
         
+            else:
+                if expand_index > 1 and kernel_index > 1:
+                    gumbel_input_expand = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
+                    gumbel_one_hot_expand = gumbel_input_expand.max(dim=-1, keepdim=True)[1]
+                    gumbel_one_hot_expand = torch.zeros_like(gumbel_input_expand, memory_format=torch.legacy_contiguous_format).scatter_(-1, gumbel_one_hot_expand, 1.0)
+                    gumbel_input_kernel = gumbel_output[:, gumbel_index + expand_index: gumbel_index + expand_index + kernel_index]
+                    gumbel_one_hot_kernel = gumbel_input_kernel.max(dim=-1, keepdim=True)[1]
+                    gumbel_one_hot_kernel = torch.zeros_like(gumbel_input_kernel, memory_format=torch.legacy_contiguous_format).scatter_(-1, gumbel_one_hot_kernel, 1.0)
+                    gumbel_one_hot = torch.cat([gumbel_one_hot_expand, gumbel_one_hot_kernel], dim=-1)                    
+                    gumbel_index += expand_index + kernel_index
+                    
+                elif expand_index > 1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + expand_index]
+                    index = gumbel_input.max(dim=-1, keepdim=True)[1]
+                    gumbel_one_hot = torch.zeros_like(gumbel_input, memory_format=torch.legacy_contiguous_format).scatter_(-1, index, 1.0)
+                    gumbel_index += expand_index
+                elif kernel_index >1:
+                    gumbel_input = gumbel_output[:, gumbel_index: gumbel_index + kernel_index]
+                    index = gumbel_input.max(dim=-1, keepdim=True)[1]
+                    gumbel_one_hot = torch.zeros_like(gumbel_input, memory_format=torch.legacy_contiguous_format).scatter_(-1, index, 1.0)
+                    gumbel_index += kernel_index
+                else:
+                    gumbel_one_hot = None
+                #print("check gumbel one hot :", gumbel_one_hot)
+                x = block(x, gumbel_one_hot)
+            
+            gumbel_one_hot_list.append(gumbel_one_hot)    
+                
+        """
+        if self.feature_mix_layer is not None:
+            x = self.feature_mix_layer(x)
+        x = x.mean(3).mean(2)
+        x = self.classifier(x)
+        return x, gumbel_one_hot_list
+
     def forward_original(self, x):
         x = self.first_conv(x)
         for i, block in enumerate(self.blocks):
@@ -242,9 +353,22 @@ class GumbelMCUNet(MyNetwork):
             if has_deep_attr(mcunet, n):
                 set_deep_attr(self, n, get_deep_attr(mcunet, n))
         
+        print(f"load pretrained mcu model parameter to gumbel net")
+        
+        
         for n, p in self.named_buffers():
             if has_deep_attr(mcunet, n):
                 set_deep_attr(self, n, get_deep_attr(mcunet, n))
         
-        print(f"load pretrained mcumodel to gumbel net")
+        for n, b in self.named_buffers():
+            if 'num_batches_tracked' in n:
+                print("before num_batches_tracked ", n, b)
+                set_deep_attr(self, n, torch.tensor(0))
+                print("after :", n, get_deep_attr(self, n))
+
+        for n, b in self.named_buffers():
+            if 'num_batches_tracked' in n:
+                print("after num_batches_tracked ", n, b)
+        
+        print(f"load pretrained mcu model buffer to gumbel net")
         
